@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verbalization Tracker</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main>
+        <h1>Verbalization Tracker</h1>
+        <p class="subtitle">Record your voice, get structured insights.</p>
+
+        <!-- Privacy / consent notice -->
+        <div id="consent-banner" class="consent-banner">
+            <p>
+                <strong>Privacy notice:</strong> Your audio is recorded in the browser and sent
+                to a <em>self-hosted</em> server for processing. No data leaves your local network.
+                Audio files are deleted after transcription. Results are stored as local JSON files.
+                By clicking "I Agree", you consent to this processing.
+            </p>
+            <button id="consent-btn">I Agree</button>
+        </div>
+
+        <!-- Recording controls (hidden until consent) -->
+        <div id="recorder" class="recorder hidden">
+            <div class="controls">
+                <button id="start-btn" class="btn btn-record">Start Recording</button>
+                <button id="stop-btn" class="btn btn-stop" disabled>Stop Recording</button>
+            </div>
+            <div id="status" class="status"></div>
+            <div id="timer" class="timer"></div>
+        </div>
+
+        <!-- Results panel -->
+        <div id="results" class="results hidden">
+            <h2>Results</h2>
+
+            <section>
+                <h3>Transcription</h3>
+                <p id="transcription-text" class="transcription-text"></p>
+            </section>
+
+            <section>
+                <h3>Entities</h3>
+                <div id="entities-list" class="tag-list"></div>
+            </section>
+
+            <section>
+                <h3>Relations</h3>
+                <ul id="relations-list" class="relations-list"></ul>
+            </section>
+
+            <section>
+                <h3>Raw JSON</h3>
+                <pre id="raw-json" class="raw-json"></pre>
+            </section>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
