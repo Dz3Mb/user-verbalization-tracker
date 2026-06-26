@@ -1,0 +1,186 @@
+/* --- Reset & base --- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f7fa;
+    color: #1a1a2e;
+    line-height: 1.6;
+}
+
+main {
+    max-width: 680px;
+    margin: 3rem auto;
+    padding: 0 1.5rem;
+}
+
+h1 { font-size: 1.8rem; }
+.subtitle { color: #555; margin-bottom: 1.5rem; }
+h2 { margin-top: 2rem; margin-bottom: 0.5rem; }
+h3 { margin-top: 1rem; margin-bottom: 0.3rem; color: #333; font-size: 1rem; }
+section { margin-bottom: 1rem; }
+
+/* --- Consent banner --- */
+.consent-banner {
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+}
+.consent-banner p { font-size: 0.9rem; margin-bottom: 0.8rem; }
+.consent-banner button {
+    background: #28a745;
+    color: #fff;
+    border: none;
+    padding: 0.5rem 1.2rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95rem;
+}
+.consent-banner button:hover { background: #218838; }
+
+/* --- Recorder --- */
+.recorder { margin-bottom: 2rem; }
+.language-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.8rem; }
+.language-row label { font-size: 0.9rem; color: #555; font-weight: 600; }
+.language-row select {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    background: #fff;
+    cursor: pointer;
+}
+.controls { display: flex; gap: 0.8rem; margin-bottom: 0.8rem; }
+
+.btn {
+    padding: 0.6rem 1.4rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-record { background: #dc3545; color: #fff; }
+.btn-record:hover:not(:disabled) { background: #c82333; }
+
+.btn-stop { background: #6c757d; color: #fff; }
+.btn-stop:hover:not(:disabled) { background: #565e64; }
+
+.status { font-size: 0.9rem; color: #555; min-height: 1.4rem; }
+.status.error { color: #dc3545; }
+.status.success { color: #28a745; }
+
+.timer { font-size: 0.85rem; color: #888; font-variant-numeric: tabular-nums; }
+
+/* --- Divider --- */
+.divider {
+    display: flex;
+    align-items: center;
+    text-align: center;
+    color: #aaa;
+    font-size: 0.8rem;
+    margin: 1.2rem 0 0.8rem;
+}
+.divider::before, .divider::after {
+    content: "";
+    flex: 1;
+    border-bottom: 1px solid #e0e0e0;
+}
+.divider span { padding: 0 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; }
+
+/* --- Drop zone --- */
+.drop-zone {
+    border: 2px dashed #b0bec5;
+    border-radius: 8px;
+    padding: 1.5rem 1rem;
+    text-align: center;
+    background: #fafafa;
+    color: #555;
+    transition: background 0.15s, border-color 0.15s;
+    cursor: pointer;
+}
+.drop-zone:hover, .drop-zone:focus {
+    border-color: #1976d2;
+    background: #f0f7ff;
+    outline: none;
+}
+.drop-zone.dragover {
+    border-color: #1565c0;
+    background: #e3f2fd;
+    color: #1565c0;
+}
+.drop-zone-main { font-weight: 600; font-size: 1rem; margin-bottom: 0.2rem; }
+.drop-zone-sub { font-size: 0.8rem; color: #888; margin-bottom: 0.8rem; }
+.btn-browse {
+    background: #fff;
+    color: #1976d2;
+    border: 1px solid #1976d2;
+    padding: 0.4rem 1.1rem;
+    font-size: 0.9rem;
+}
+.btn-browse:hover:not(:disabled) { background: #e3f2fd; }
+
+/* --- Results --- */
+.transcription-text {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 1rem;
+    font-style: italic;
+}
+.lang-note { font-size: 0.8rem; color: #888; margin-top: 0.3rem; }
+
+.tag-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.tag {
+    display: inline-block;
+    background: #e3f2fd;
+    border: 1px solid #90caf9;
+    border-radius: 12px;
+    padding: 0.2rem 0.7rem;
+    font-size: 0.85rem;
+}
+.tag .label { color: #1565c0; font-weight: 600; margin-left: 0.3rem; font-size: 0.75rem; }
+
+/* Knowledge-graph links on entity tags */
+.kg-links { margin-left: 0.4rem; display: inline-flex; gap: 0.3rem; }
+.kg {
+    text-decoration: none;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.05rem 0.4rem;
+    border-radius: 8px;
+    border: 1px solid transparent;
+}
+.kg.wd { background: #ede7f6; color: #5e35b1; border-color: #b39ddb; }
+.kg.db { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
+.kg:hover { filter: brightness(0.95); }
+
+.relations-list { list-style: none; }
+.relations-list li {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 0.6rem 1rem;
+    margin-bottom: 0.4rem;
+    font-size: 0.9rem;
+}
+.relations-list .triple { font-weight: 600; }
+.relations-list .sentence { color: #777; font-size: 0.8rem; display: block; margin-top: 0.2rem; }
+
+.raw-json {
+    background: #1a1a2e;
+    color: #a5d6a7;
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* --- Utility --- */
+.hidden { display: none; }
