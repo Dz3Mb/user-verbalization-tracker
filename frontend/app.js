@@ -197,10 +197,18 @@ function displayResults(data) {
     // Transcription
     transcriptionText.textContent = data.transcription?.text || "(no text)";
     const detected = data.transcription?.language;
-    if (detected) {
+    const langProb = data.transcription?.language_probability;
+    const model = data.transcription?.model;
+    if (detected || model) {
         const note = document.createElement("div");
         note.className = "lang-note";
-        note.textContent = `Detected language: ${detected}`;
+        const bits = [];
+        if (detected) {
+            const probStr = langProb != null ? ` (${Math.round(langProb * 100)}%)` : "";
+            bits.push(`Detected language: ${detected}${probStr}`);
+        }
+        if (model) bits.push(`Whisper model: ${model}`);
+        note.textContent = bits.join("  ·  ");
         transcriptionText.insertAdjacentElement("afterend", note);
         // Avoid stacking notes across runs
         const prev = transcriptionText.parentElement.querySelectorAll(".lang-note");
@@ -221,14 +229,25 @@ function displayResults(data) {
                 escapeHtml(ent.text) +
                 `<span class="label">${escapeHtml(ent.label)}</span>`;
 
+            // Knowledge-graph type (from Wikidata P31), independent of spaCy's
+            // NER label. Shown as a separate badge so mismatches are visible.
+            const wd = ent.wikidata;
+            if (wd && wd.kg_type) {
+                const cls = wd.label_mismatch ? "kg-type mismatch" : "kg-type";
+                const title = wd.label_mismatch
+                    ? `Wikidata says: ${wd.kg_type} (does not match spaCy label ${ent.label})`
+                    : `Wikidata type: ${wd.kg_type}`;
+                html += `<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(wd.kg_type)}</span>`;
+            }
+
             // Knowledge-graph links (Wikidata / DBpedia), when available
             const links = [];
-            if (ent.wikidata && ent.wikidata.url) {
-                const title = ent.wikidata.description
-                    ? `${ent.wikidata.label} — ${ent.wikidata.description}`
-                    : ent.wikidata.label || ent.wikidata.id;
+            if (wd && wd.url) {
+                const tip = wd.description
+                    ? `${wd.label} — ${wd.description}`
+                    : wd.label || wd.id;
                 links.push(
-                    `<a class="kg wd" href="${escapeHtml(ent.wikidata.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${escapeHtml(ent.wikidata.id)}</a>`
+                    `<a class="kg wd" href="${escapeHtml(wd.url)}" target="_blank" rel="noopener" title="${escapeHtml(tip)}">${escapeHtml(wd.id)}</a>`
                 );
             }
             if (ent.dbpedia && ent.dbpedia.uri) {

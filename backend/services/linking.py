@@ -49,11 +49,44 @@ SPOTLIGHT_URL = os.getenv(
 )
 SPOTLIGHT_CONFIDENCE = float(os.getenv("DBPEDIA_SPOTLIGHT_CONFIDENCE", "0.5"))
 
-HTTP_TIMEOUT = float(os.getenv("LINKING_HTTP_TIMEOUT", "8"))
+HTTP_TIMEOUT = float(os.getenv("LINKING_HTTP_TIMEOUT", "20"))
 DBPEDIA_RESOURCE_BASE = "https://dbpedia.org/resource/"
 
-# spaCy labels worth linking. Includes English (en_core_web_sm: PERSON, ORG,
-# GPE...) and French/multilingual (fr_core_news_sm: PER, LOC, ORG, MISC) labels.
+# If true, the spaCy NER label is used as a *strict* filter when picking a
+# Wikidata candidate. Disabled by default because spaCy small/medium models
+# frequently mislabel rare or foreign proper nouns (e.g. a Polish first name
+# labelled "LOC"), which would bias the search toward the wrong type entirely.
+# When disabled, the linker still uses spaCy to find entity *boundaries* in
+# the text, but the candidate selection ignores the predicted label and
+# relies on Wikidata's own type (P31) instead.
+USE_SPACY_TYPE = _flag("LINKING_USE_SPACY_TYPE", "false")
+
+# Sentence-level disambiguation: rerank Wikidata candidates by the semantic
+# similarity between their description and the sentence containing the entity.
+# This resolves ambiguities like "Hugo" (Victor Hugo vs. Hugo the film) when
+# the surrounding sentence gives enough context. Implementation lives below;
+# it lazily loads a multilingual SentenceTransformer model.
+ENABLE_SEMANTIC_RERANK = _flag("LINKING_SEMANTIC_RERANK", "true")
+SEMANTIC_MODEL_NAME = os.getenv(
+    "LINKING_SEMANTIC_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+# When the spread between candidates is small, semantic similarity is just
+# noise. We only consider it meaningful if the best similarity exceeds this
+# threshold and beats the next-best by SEMANTIC_REORDER_MARGIN. Tuned to
+# conservatively prefer Wikidata's default ranking unless context is strong.
+SEMANTIC_MIN_SCORE = float(os.getenv("LINKING_SEMANTIC_MIN_SCORE", "0.5"))
+SEMANTIC_REORDER_MARGIN = float(os.getenv("LINKING_SEMANTIC_MARGIN", "0.15"))
+
+# Walk P279 (subclass of) up to N hops when checking type matches, so a
+# candidate of class "U.S. state" (Q35657) is recognized as a kind of
+# "administrative territorial entity" (Q56061) without enumerating every
+# subclass. Cached in memory.
+P279_MAX_DEPTH = int(os.getenv("LINKING_P279_DEPTH", "2"))
+
+# Labels we treat as "name-like" entities worth linking. We include both the
+# English (OntoNotes) and French (UD/multilingual) label sets, plus we keep
+# this list inclusive on purpose: when spaCy's predicted label is wrong, we
+# do not want to drop the entity entirely just because the label is unusual.
 LINKABLE_LABELS = {
     # English model
     "PERSON", "ORG", "GPE", "LOC", "NORP", "FAC", "PRODUCT", "EVENT",
@@ -62,9 +95,15 @@ LINKABLE_LABELS = {
     "PER", "MISC",
 }
 
+# Labels we explicitly do NOT link (numerics, time expressions, etc. — they
+# rarely have a meaningful Wikidata item that resolves from the surface form).
+NON_LINKABLE_LABELS = {
+    "DATE", "TIME", "CARDINAL", "ORDINAL", "PERCENT", "MONEY", "QUANTITY",
+}
+
 # Number of Wikidata candidates to consider when type-filtering. Larger values
 # improve recall on ambiguous surface forms at a small bandwidth cost.
-WIKIDATA_SEARCH_LIMIT = int(os.getenv("WIKIDATA_SEARCH_LIMIT", "10"))
+WIKIDATA_SEARCH_LIMIT = int(os.getenv("WIKIDATA_SEARCH_LIMIT", "6"))
 
 # Map a spaCy NER label to a set of Wikidata "instance of" (P31) class QIDs
 # that the candidate must match. This rejects candidates of the wrong type
@@ -123,6 +162,8 @@ SPACY_LABEL_TO_WIKIDATA_CLASSES: dict[str, set[str]] = {
         "Q570116",     # tourist attraction
         "Q486972",     # human settlement (overlap with GPE on purpose)
         "Q515",        # city
+        "Q1549591",    # big city
+        "Q5119",       # capital
         "Q6256",       # country
     },
 
@@ -160,10 +201,177 @@ SPACY_LABEL_TO_WIKIDATA_CLASSES: dict[str, set[str]] = {
     "MISC": set(),
 }
 
+# Human-readable labels for the most common Wikidata P31 classes, so each
+# linked entity can show its *actual* type from the knowledge graph,
+# independently of spaCy's (sometimes wrong) NER label. See `_readable_type`.
+WIKIDATA_CLASS_LABELS: dict[str, str] = {
+    "Q5": "human",
+    "Q43229": "organization",
+    "Q4830453": "business",
+    "Q783794": "company",
+    "Q6881511": "enterprise",
+    "Q891723": "public company",
+    "Q161726": "multinational corporation",
+    "Q3918": "university",
+    "Q163740": "nonprofit organization",
+    "Q484652": "international organization",
+    "Q327333": "government agency",
+    "Q7278": "political party",
+    "Q6256": "country",
+    "Q3624078": "sovereign state",
+    "Q515": "city",
+    "Q1549591": "big city",
+    "Q5119": "capital",
+    "Q35657": "U.S. state",
+    "Q484170": "commune of France",
+    "Q3957": "town",
+    "Q486972": "human settlement",
+    "Q33837": "river",
+    "Q23397": "lake",
+    "Q8502": "mountain",
+    "Q41176": "building",
+    "Q811979": "architectural structure",
+    "Q570116": "tourist attraction",
+    "Q11424": "film",
+    "Q571": "book",
+    "Q482994": "album",
+    "Q7889": "video game",
+    "Q34770": "language",
+}
+
 _session = requests.Session()
 _session.headers.update(
     {"User-Agent": "VerbalizationTracker/0.1 (research prototype)"}
 )
+
+
+# --- Semantic re-ranker (lazy-loaded sentence transformer) -----------------
+
+_embed_model = None
+_embed_failed = False  # avoid re-trying on every request after a failure
+
+
+def _get_embedder():
+    """Return a (lazy-loaded) SentenceTransformer for context disambiguation.
+
+    The model is downloaded the first time it is needed. If the package is
+    not installed or the download fails (e.g. offline), we log once and
+    return None so the linker degrades gracefully.
+    """
+    global _embed_model, _embed_failed
+    if _embed_model is not None or _embed_failed:
+        return _embed_model
+    if not ENABLE_SEMANTIC_RERANK:
+        return None
+    try:
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        logger.info("Loaded semantic reranker: %s", SEMANTIC_MODEL_NAME)
+    except Exception as e:  # noqa: BLE001 - best effort
+        logger.warning("Semantic reranker unavailable: %s", e)
+        _embed_failed = True
+        _embed_model = None
+    return _embed_model
+
+
+def _cosine(a, b) -> float:
+    """Cosine similarity between two numpy vectors (assumed non-zero)."""
+    import numpy as np
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+
+
+def _semantic_rerank(candidates, context_sentence: str):
+    """Score candidates by semantic similarity of their Wikidata description
+    to the entity's surrounding sentence. Returns a dict {qid: similarity}.
+
+    Returns an empty dict if the embedder is unavailable, the context is
+    empty, or no candidate has a description.
+    """
+    if not candidates or not (context_sentence or "").strip():
+        return {}
+    model = _get_embedder()
+    if model is None:
+        return {}
+    items = [(c["id"], c.get("description") or c.get("label") or "") for c in candidates]
+    items = [(qid, desc) for qid, desc in items if desc]
+    if not items:
+        return {}
+    try:
+        ctx_emb = model.encode(context_sentence, normalize_embeddings=True)
+        cand_embs = model.encode(
+            [desc for _, desc in items], normalize_embeddings=True
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("semantic encoding failed: %s", e)
+        return {}
+    return {qid: float(ctx_emb @ cand_embs[i]) for i, (qid, _) in enumerate(items)}
+
+
+# --- Wikidata P279 (subclass-of) traversal ---------------------------------
+
+_p279_cache: dict[str, set[str]] = {}
+
+
+def _expand_p279(qids: set[str]) -> set[str]:
+    """Walk P279 (subclass-of) up to P279_MAX_DEPTH hops from the given QIDs.
+
+    Returns the union of the input QIDs and all ancestor classes. Cached so
+    repeated entities don't pay the network cost. Best-effort: a network
+    failure short-circuits the expansion and we return what we have so far.
+    """
+    if P279_MAX_DEPTH <= 0 or not qids:
+        return set(qids)
+    visited: set[str] = set(qids)
+    frontier: set[str] = set(qids) - set(_p279_cache.keys())
+    # Seed with cached parents for already-known QIDs.
+    for q in qids:
+        if q in _p279_cache:
+            visited |= _p279_cache[q]
+    for _ in range(P279_MAX_DEPTH):
+        new_qids = frontier - visited
+        if not new_qids:
+            break
+        parents = _safe(_wikidata_p279_parents, list(new_qids))
+        if not parents:
+            break
+        visited |= new_qids
+        next_frontier: set[str] = set()
+        for q in new_qids:
+            ps = parents.get(q, set())
+            _p279_cache[q] = ps
+            next_frontier |= ps
+        frontier = next_frontier
+    visited |= frontier
+    return visited
+
+
+def _wikidata_p279_parents(qids):
+    """Map QIDs to the set of their direct P279 parents (batched)."""
+    out: dict[str, set[str]] = {}
+    for i in range(0, len(qids), 50):
+        chunk = qids[i : i + 50]
+        resp = _session.get(
+            WIKIDATA_API,
+            params={
+                "action": "wbgetentities",
+                "ids": "|".join(chunk),
+                "props": "claims",
+                "format": "json",
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        for qid, data in resp.json().get("entities", {}).items():
+            classes: set[str] = set()
+            for stmt in data.get("claims", {}).get("P279", []):
+                snak = stmt.get("mainsnak", {})
+                if snak.get("snaktype") != "value":
+                    continue
+                value = snak.get("datavalue", {}).get("value", {})
+                if isinstance(value, dict) and value.get("id"):
+                    classes.add(value["id"])
+            out[qid] = classes
+    return out
 
 
 def _safe(fn, *args):
@@ -255,32 +463,96 @@ def _wikidata_claims_and_sitelinks(qids):
 
 
 def _pick_best_candidate(candidates: list[dict], spacy_label: str,
-                         meta_by_qid: dict[str, dict]) -> tuple[dict | None, str]:
-    """Pick the best Wikidata candidate using the spaCy type as a filter.
+                         meta_by_qid: dict[str, dict],
+                         context_sentence: str = "") -> tuple[dict | None, str]:
+    """Pick the best Wikidata candidate, combining three signals:
 
-    Returns (candidate, reason) where `reason` is "type-match" if the type
-    filter selected a non-top candidate, "top-1" if no filter applied or no
-    candidate matched, or "no-candidate".
+    1. **Semantic similarity** between the candidate's description and the
+       sentence containing the entity. Resolves homonyms when the surrounding
+       sentence gives enough context (e.g. "Victor Hugo wrote Les Misérables"
+       prefers the writer over the company "Hugo Boss"). Enabled by default
+       via `LINKING_SEMANTIC_RERANK`.
+    2. **Type-aware filter** using the spaCy NER label, with subclass
+       expansion (P279). Opt-in via `LINKING_USE_SPACY_TYPE=true`; off by
+       default because small spaCy models often mislabel rare entities.
+    3. **Known-type fallback**: among candidates with any recognized P31
+       class. This is the default selection when (1) is uninformative.
+
+    Returns (candidate, reason) where `reason` reports how the pick was made.
     """
     if not candidates:
         return None, "no-candidate"
 
-    expected = SPACY_LABEL_TO_WIKIDATA_CLASSES.get(spacy_label, set())
-    if not expected:
-        return candidates[0], "top-1"
+    known_classes = set(WIKIDATA_CLASS_LABELS.keys())
 
+    # Quick check: does the top-1 already have a known P31 type? If so, it's
+    # a "solid" candidate (Wikidata's default ranking surfaced an entity of a
+    # recognized kind, which is usually the right answer for common names).
+    # We then only let the semantic reranker override it on a strong signal.
+    top = candidates[0]
+    top_p31 = meta_by_qid.get(top["id"], {}).get("p31", set())
+    top_is_solid = bool(top_p31 & known_classes) or bool(
+        _expand_p279(top_p31) & known_classes
+    )
+
+    # 1. Semantic re-ranking with the context sentence (if any).
+    sims = _semantic_rerank(candidates, context_sentence) if context_sentence else {}
+    if sims:
+        ranked = sorted(candidates, key=lambda c: sims.get(c["id"], 0.0), reverse=True)
+        top_sim = sims.get(ranked[0]["id"], 0.0)
+        second_sim = sims.get(ranked[1]["id"], 0.0) if len(ranked) > 1 else 0.0
+        margin = top_sim - second_sim
+        # Override the default top-1 only on a strong signal. When the default
+        # top-1 is already solid, require an even larger margin to overrule it.
+        required_margin = SEMANTIC_REORDER_MARGIN * (2 if top_is_solid else 1)
+        if top_sim >= SEMANTIC_MIN_SCORE and margin >= required_margin:
+            # Don't bother overriding if the reranker picks the same candidate.
+            if ranked[0]["id"] != top["id"]:
+                return ranked[0], f"semantic-rerank({top_sim:.2f})"
+
+    # 2. Type-aware mode (opt-in): strict filter by spaCy label, P279 expanded.
+    if USE_SPACY_TYPE:
+        expected = SPACY_LABEL_TO_WIKIDATA_CLASSES.get(spacy_label, set())
+        if expected:
+            expected_expanded = _expand_p279(expected)
+            for idx, cand in enumerate(candidates):
+                cand_classes = meta_by_qid.get(cand["id"], {}).get("p31", set())
+                cand_expanded = _expand_p279(cand_classes)
+                if cand_expanded & expected_expanded:
+                    return cand, ("type-match" if idx > 0 else "top-1-type-match")
+
+    # 3. Type-agnostic (default): first candidate with any recognized P31
+    #    class (P279-expanded so subclasses of known types also count).
     for idx, cand in enumerate(candidates):
         cand_classes = meta_by_qid.get(cand["id"], {}).get("p31", set())
-        if cand_classes & expected:
-            return cand, ("type-match" if idx > 0 else "top-1-type-match")
+        if cand_classes & known_classes:
+            return cand, ("known-type" if idx > 0 else "top-1")
+        cand_expanded = _expand_p279(cand_classes)
+        if cand_expanded & known_classes:
+            return cand, ("known-type-p279" if idx > 0 else "top-1-p279")
 
-    # No candidate had a matching P31 — fall back to the top result so we
-    # always return something (with a clear "fallback" reason in the JSON).
+    # 4. Last resort: top-1.
     return candidates[0], "top-1-fallback"
 
 
 def _dbpedia_uri_from_title(title: str) -> str:
     return DBPEDIA_RESOURCE_BASE + quote(title.replace(" ", "_"))
+
+
+def _readable_type(p31_qids: set) -> tuple[str | None, list]:
+    """Derive a human-readable type for an entity from its Wikidata P31 classes.
+
+    Returns (label, qids) where `label` is a readable string (e.g. "human",
+    "company", "city") taken from the first recognized class, or None if no
+    class is recognized. `qids` is the raw list of P31 QIDs (always returned,
+    for transparency). This is what lets the UI show the *actual* type from the
+    knowledge graph, independently of spaCy's NER label.
+    """
+    qids = sorted(p31_qids)
+    for qid in qids:
+        if qid in WIKIDATA_CLASS_LABELS:
+            return WIKIDATA_CLASS_LABELS[qid], qids
+    return None, qids
 
 
 def _spotlight(text: str):
@@ -321,6 +593,22 @@ def _match_spotlight(entity, spotlight):
     return None
 
 
+def _sentence_around(text: str, start_char: int, end_char: int) -> str:
+    """Return the sentence that contains [start_char, end_char) in `text`.
+
+    Uses a simple punctuation-based split, which is sufficient for short
+    transcripts and avoids loading a second NLP pipeline just for this.
+    """
+    if not text or start_char < 0 or end_char <= start_char:
+        return text or ""
+    # Find sentence boundaries before and after the entity span.
+    left_punct = max(text.rfind(p, 0, start_char) for p in (".", "!", "?", "\n"))
+    right_candidates = [text.find(p, end_char) for p in (".", "!", "?", "\n")]
+    right_candidates = [r for r in right_candidates if r != -1]
+    right_punct = min(right_candidates) if right_candidates else len(text)
+    return text[left_punct + 1 : right_punct + 1].strip()
+
+
 def enrich_entities(text: str, entities: list[dict], lang: str | None = None) -> dict:
     """Add `wikidata` and `dbpedia` links to entities where possible.
 
@@ -348,8 +636,13 @@ def enrich_entities(text: str, entities: list[dict], lang: str | None = None) ->
     candidates_cache: dict[tuple[str, str], list[dict]] = {}
     for ent in entities:
         label = ent.get("label", "")
-        if label not in LINKABLE_LABELS:
+        # Skip numeric/time labels (rarely have a useful Wikidata item).
+        if label in NON_LINKABLE_LABELS:
             continue
+        # Be inclusive on the linkable side: if the label is not a known
+        # "name-like" type either, we still attempt linking — spaCy's label
+        # is unreliable for rare or foreign proper nouns, and we'd rather try
+        # and let Wikidata decide than drop the entity silently.
         key = (ent["text"], label)
         if key not in candidates_cache:
             candidates_cache[key] = (
@@ -369,10 +662,20 @@ def enrich_entities(text: str, entities: list[dict], lang: str | None = None) ->
         e = dict(ent)
         label = ent.get("label", "")
         cands = candidates_cache.get((ent["text"], label), [])
-        chosen, reason = _pick_best_candidate(cands, label, meta_by_qid) if cands else (None, "no-candidate")
+        # Pass the sentence that contains the entity for context-aware
+        # semantic disambiguation.
+        context = _sentence_around(
+            text, ent.get("start_char", -1), ent.get("end_char", -1)
+        )
+        chosen, reason = (
+            _pick_best_candidate(cands, label, meta_by_qid, context)
+            if cands else (None, "no-candidate")
+        )
 
         if chosen:
             meta["wikidata_used"] = True
+            kg_p31 = meta_by_qid.get(chosen["id"], {}).get("p31", set())
+            kg_type, kg_type_qids = _readable_type(kg_p31)
             e["wikidata"] = {
                 "id": chosen["id"],
                 "label": chosen["label"],
@@ -380,6 +683,14 @@ def enrich_entities(text: str, entities: list[dict], lang: str | None = None) ->
                 "url": chosen["url"],
                 "match": reason,                # how the candidate was chosen
                 "candidates": len(cands),       # how many were considered
+                "kg_type": kg_type,             # actual type from Wikidata (P31)
+                "kg_type_qids": kg_type_qids,   # raw P31 QIDs, for transparency
+                "spacy_label": label,           # what spaCy thought (may differ)
+                "label_mismatch": bool(
+                    kg_type and label and label not in ("MISC",)
+                    and not (meta_by_qid.get(chosen["id"], {}).get("p31", set())
+                             & SPACY_LABEL_TO_WIKIDATA_CLASSES.get(label, set()))
+                ),
             }
             title = meta_by_qid.get(chosen["id"], {}).get("title")
             if title:

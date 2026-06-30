@@ -1,4 +1,18 @@
-"""NLP service: entity extraction and simple rule-based relation extraction."""
+"""NLP service: entity extraction and rule-based relation extraction.
+
+Public API (import these from `services.nlp`):
+- analyze_text(text, lang)      -> {"entities": [...], "relations": [...]}
+- extract_entities(text, lang)  -> list of entity dicts
+- extract_relations(text, lang) -> list of relation triples
+- token_breakdown(text, lang)   -> per-token analysis (debug / teaching)
+
+How to extend:
+- Add a language: register its spaCy model in `_MODEL_BY_LANG` (the loader
+  prefers the `md` model and falls back to `sm`, then to English).
+- Tune relations: edit `extract_relations` (dependency-label rules) or the
+  helper `_phrase` (how a noun phrase is reconstructed).
+- Tune which entities are kept: edit `extract_entities`.
+"""
 
 import logging
 
@@ -6,11 +20,13 @@ import spacy
 
 logger = logging.getLogger("nlp")
 
-# Map language codes to spaCy models. Models are loaded lazily and cached so we
-# only pay the load cost for languages actually used.
+# Map language codes to spaCy model candidates, in preference order.
+# We prefer the largest CNN-based models available (lg > md > sm). The
+# transformer-based "_trf" English model requires `curated-tokenizers` which
+# does not yet build on Python 3.13, so we don't list it here.
 _MODEL_BY_LANG = {
-    "en": "en_core_web_sm",
-    "fr": "fr_core_news_sm",
+    "en": ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"],
+    "fr": ["fr_core_news_lg", "fr_core_news_md", "fr_core_news_sm"],
 }
 _DEFAULT_LANG = "en"
 _nlp_cache: dict[str, "spacy.language.Language"] = {}
@@ -83,10 +99,11 @@ def _phrase(token, chunk_map: dict) -> str:
 
 
 def _get_nlp(lang: str | None):
-    """Return a loaded spaCy pipeline for `lang`, falling back to English.
+    """Return a loaded spaCy pipeline for `lang`, falling back gracefully.
 
-    If the requested language model is not installed, we log a warning and use
-    the default English model so the pipeline keeps working.
+    Tries the preferred models for the language in order (md, then sm). If
+    none is installed, logs a warning and falls back to the default English
+    model so the pipeline keeps working.
     """
     code = (lang or _DEFAULT_LANG).split("-")[0].lower()
     if code not in _MODEL_BY_LANG:
@@ -95,18 +112,28 @@ def _get_nlp(lang: str | None):
     if code in _nlp_cache:
         return _nlp_cache[code]
 
-    model_name = _MODEL_BY_LANG[code]
-    try:
-        nlp = spacy.load(model_name)
-    except OSError:
+    nlp = None
+    for model_name in _MODEL_BY_LANG[code]:
+        try:
+            nlp = spacy.load(model_name)
+            logger.info("Loaded spaCy model '%s' for language '%s'.", model_name, code)
+            break
+        except OSError:
+            continue
+
+    if nlp is None:
         logger.warning(
-            "spaCy model '%s' for language '%s' not installed; "
+            "No spaCy model installed for language '%s' (%s); "
             "falling back to English.",
-            model_name,
-            code,
+            code, ", ".join(_MODEL_BY_LANG[code]),
         )
         if _DEFAULT_LANG not in _nlp_cache:
-            _nlp_cache[_DEFAULT_LANG] = spacy.load(_MODEL_BY_LANG[_DEFAULT_LANG])
+            for model_name in _MODEL_BY_LANG[_DEFAULT_LANG]:
+                try:
+                    _nlp_cache[_DEFAULT_LANG] = spacy.load(model_name)
+                    break
+                except OSError:
+                    continue
         nlp = _nlp_cache[_DEFAULT_LANG]
 
     _nlp_cache[code] = nlp
@@ -254,3 +281,36 @@ def analyze_text(text: str, lang: str | None = None) -> dict:
         "entities": extract_entities(text, lang),
         "relations": extract_relations(text, lang),
     }
+
+
+def token_breakdown(text: str, lang: str | None = None) -> list[dict]:
+    """Return spaCy's per-token analysis of the text (debug / teaching tool).
+
+    This shows *how spaCy reads the transcription*, token by token. The most
+    relevant field for "where does an entity begin / continue / end" is the
+    IOB tag (`ent_iob`):
+      - "B" = Begin: first token of a named entity
+      - "I" = Inside: a token in the middle or at the end of an entity
+      - "O" = Outside: the token is not part of any entity
+    (spaCy uses the IOB2 scheme; a single-token entity is just "B".)
+
+    Other fields:
+      - pos:  coarse part of speech (PROPN, VERB, NOUN, DET, ...)
+      - dep:  syntactic dependency label to the head token
+      - head: the token this one attaches to (drives relation extraction)
+    """
+    doc = _get_nlp(lang)(text)
+    out = []
+    for tok in doc:
+        out.append({
+            "i": tok.i,
+            "text": tok.text,
+            "lemma": tok.lemma_,
+            "pos": tok.pos_,
+            "dep": tok.dep_,
+            "head": tok.head.text,
+            "ent_iob": tok.ent_iob_,      # B / I / O  (begin / inside / outside)
+            "ent_type": tok.ent_type_,    # entity label when part of an entity
+            "is_sent_start": bool(tok.is_sent_start),
+        })
+    return out

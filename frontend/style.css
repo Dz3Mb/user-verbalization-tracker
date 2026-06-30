@@ -145,6 +145,24 @@ section { margin-bottom: 1rem; }
 }
 .tag .label { color: #1565c0; font-weight: 600; margin-left: 0.3rem; font-size: 0.75rem; }
 
+/* Real type from Wikidata (P31), shown alongside spaCy's NER label. */
+.kg-type {
+    display: inline-block;
+    background: #fff8e1;
+    color: #6d4c00;
+    border: 1px solid #ffe082;
+    border-radius: 8px;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.7rem;
+    margin-left: 0.3rem;
+    font-style: italic;
+}
+.kg-type.mismatch {
+    background: #ffebee;
+    color: #b71c1c;
+    border-color: #ef9a9a;
+}
+
 /* Knowledge-graph links on entity tags */
 .kg-links { margin-left: 0.4rem; display: inline-flex; gap: 0.3rem; }
 .kg {

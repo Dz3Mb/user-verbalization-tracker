@@ -88,6 +88,9 @@ async def analyze(file: UploadFile = File(...), language: str = Form("auto")):
 
         return {"session_id": session_id, **result}
 
+    except HTTPException:
+        # Don't mask validation errors as 500s; let FastAPI propagate them.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
