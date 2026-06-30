@@ -6,6 +6,8 @@ venv/
 .venv/
 backend/uploads/*
 !backend/uploads/.gitkeep
+!backend/uploads/sample_speech.wav
+!backend/uploads/Interview_Mbappe.mp3
 backend/results/*
 !backend/results/.gitkeep
 *.egg-info/
